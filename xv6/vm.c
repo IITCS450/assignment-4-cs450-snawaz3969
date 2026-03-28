@@ -188,7 +188,7 @@ inituvm(pde_t *pgdir, char *init, uint sz)
     panic("inituvm: more than a page");
   mem = kalloc();
   memset(mem, 0, PGSIZE);
-  mappages(pgdir, 0, PGSIZE, V2P(mem), PTE_W|PTE_U);
+  mappages(pgdir, (void*)PGSIZE, PGSIZE, V2P(mem), PTE_W|PTE_U);
   memmove(mem, init, sz);
 }
 
@@ -323,16 +323,15 @@ copyuvm(pde_t *pgdir, uint sz)
   if((d = setupkvm()) == 0)
     return 0;
   for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
-      panic("copyuvm: pte should exist");
-    if(!(*pte & PTE_P))
-      panic("copyuvm: page not present");
+    pte = walkpgdir(pgdir, (void*)i, 0);
+    if(pte == 0 || !(*pte & PTE_P))
+      continue;   // allow unmapped holes such as page 0
     pa = PTE_ADDR(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
       goto bad;
     memmove(mem, (char*)P2V(pa), PGSIZE);
-    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
+    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0){
       kfree(mem);
       goto bad;
     }
@@ -382,6 +381,70 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
     buf += n;
     va = va0 + PGSIZE;
   }
+  return 0;
+}
+
+int
+mprotect(void *addr, int len)
+{
+  pte_t *pte;
+  uint a;
+  int i;
+  struct proc *p = myproc();
+
+  if((uint)addr % PGSIZE != 0 || len <= 0)
+    return -1;
+
+  // Validate first: all pages must exist and be user pages.
+  a = (uint)addr;
+  for(i = 0; i < len; i++, a += PGSIZE){
+    if(a >= p->sz)
+      return -1;
+    pte = walkpgdir(p->pgdir, (void*)a, 0);
+    if(pte == 0 || !(*pte & PTE_P) || !(*pte & PTE_U))
+      return -1;
+  }
+
+  // Apply protection.
+  a = (uint)addr;
+  for(i = 0; i < len; i++, a += PGSIZE){
+    pte = walkpgdir(p->pgdir, (void*)a, 0);
+    *pte &= ~PTE_W;
+  }
+
+  lcr3(V2P(p->pgdir));   // flush TLB
+  return 0;
+}
+
+int
+munprotect(void *addr, int len)
+{
+  pte_t *pte;
+  uint a;
+  int i;
+  struct proc *p = myproc();
+
+  if((uint)addr % PGSIZE != 0 || len <= 0)
+    return -1;
+
+  // Validate first: all pages must exist and be user pages.
+  a = (uint)addr;
+  for(i = 0; i < len; i++, a += PGSIZE){
+    if(a >= p->sz)
+      return -1;
+    pte = walkpgdir(p->pgdir, (void*)a, 0);
+    if(pte == 0 || !(*pte & PTE_P) || !(*pte & PTE_U))
+      return -1;
+  }
+
+  // Restore write permission.
+  a = (uint)addr;
+  for(i = 0; i < len; i++, a += PGSIZE){
+    pte = walkpgdir(p->pgdir, (void*)a, 0);
+    *pte |= PTE_W;
+  }
+
+  lcr3(V2P(p->pgdir));   // flush TLB
   return 0;
 }
 
